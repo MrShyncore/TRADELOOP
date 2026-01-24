@@ -8,7 +8,7 @@ import requests
 import xml.etree.ElementTree as ET
 from tradingview_ta import TA_Handler, Interval, Exchange
 import matplotlib
-from streamlit_lottie import st_lottie # KITA KEMBALIKAN INI
+from streamlit_lottie import st_lottie
 
 # [BACKEND SETUP]
 matplotlib.use('Agg')
@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 # 1. KONFIGURASI HALAMAN (GAYA NEON v9.2)
 # ==========================================
 st.set_page_config(
-    page_title="TRADELOOP Hybrid",
-    page_icon="",
+    page_title="TRADELOOP Hybrid v10.2",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -83,7 +83,7 @@ st.markdown(f"""
         transform: scale(1.02);
     }}
 
-    /* 6. CARD STYLING (LOGIKA v10.1 TAPI TAMPILAN NEON) */
+    /* 6. CARD STYLING */
     .plan-card {{
         background-color: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -107,7 +107,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. UTILITIES & ANIMASI (LOTTIE KEMBALI)
+# 2. UTILITIES & ANIMASI
 # ==========================================
 @st.cache_data
 def load_lottieurl(url):
@@ -123,7 +123,7 @@ LOTTIE_SCAN = "https://lottie.host/801a666e-2178-45f8-8422-7901584c3116/226d9c79
 LOTTIE_FUNDAMENTAL = "https://lottie.host/96e6d191-10d9-43c3-8f0a-1a8089403328/W5yB9Z9d2w.json"
 
 # ==========================================
-# 3. LOGIC ENGINE (v10.1 HYBRID)
+# 3. LOGIC ENGINE (Updated v10.2)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_stock_data(ticker, period="1y"):
@@ -171,17 +171,7 @@ def get_tv_analysis(ticker):
 
 def get_news(ticker):
     try:
-        # KITA TAMBAHKAN SUMBER TERPERCAYA BARU (Bisnis.com & Emitennews)
-        sources = (
-            "site:cnbcindonesia.com OR "
-            "site:kontan.co.id OR "
-            "site:investor.id OR "
-            "site:bisnis.com OR "     # Bagus untuk info sektor/industri
-            "site:emitennews.com OR " # Cepat untuk info RUPS/Dividen
-            "site:idx.co.id"          # Sumber resmi
-        )
-        
-        # Query Google News
+        sources = "site:cnbcindonesia.com OR site:kontan.co.id OR site:investor.id OR site:bisnis.com OR site:emitennews.com OR site:idx.co.id"
         query = f"Saham {ticker} ({sources})"
         url = f"https://news.google.com/rss/search?q={query}&hl=id-ID&gl=ID&ceid=ID:id"
         
@@ -189,11 +179,9 @@ def get_news(ticker):
         root = ET.fromstring(resp.content)
         news = []
         
-        for item in root.findall('./channel/item')[:7]: # Ambil 7 berita terbaru
+        for item in root.findall('./channel/item')[:7]:
             raw_title = item.find('title').text
             clean_title = raw_title.split(' - ')[0] if raw_title else "Berita Saham"
-            
-            # Membersihkan nama source agar rapi di UI
             src_raw = item.find('source').text if item.find('source') is not None else "News"
             src_clean = src_raw.replace("CNBC Indonesia", "CNBC").replace("Bisnis.com", "Bisnis").replace("KONTAN", "Kontan")
             
@@ -205,7 +193,42 @@ def get_news(ticker):
             })
         return news
     except: return []
-    
+
+# --- NEW: LOGIC BANDARMOLOGY ---
+def analyze_bandarmology(df):
+    try:
+        # Rata-rata Volume 20 Hari
+        avg_vol = df['Volume'].rolling(window=20).mean()
+        if avg_vol.iloc[-1] == 0: return "NETRAL", TEXT_WHITE, 1.0
+        
+        last_vol = df['Volume'].iloc[-1]
+        last_close = df['Close'].iloc[-1]
+        prev_close = df['Close'].iloc[-2]
+        
+        vol_ratio = last_vol / avg_vol.iloc[-1]
+        
+        status = "NETRAL"
+        color = TEXT_WHITE
+        
+        # Logika: Harga Naik + Volume Besar = Akumulasi
+        if last_close > prev_close and vol_ratio > 1.5:
+            status = "AKUMULASI BESAR"
+            color = SUCCESS_NEON
+        elif last_close > prev_close and vol_ratio > 1.1:
+            status = "AKUMULASI"
+            color = SUCCESS_NEON
+        # Logika: Harga Turun + Volume Besar = Distribusi
+        elif last_close < prev_close and vol_ratio > 1.5:
+            status = "DISTRIBUSI BESAR"
+            color = DANGER_NEON
+        elif last_close < prev_close and vol_ratio > 1.1:
+            status = "DISTRIBUSI"
+            color = DANGER_NEON
+            
+        return status, color, vol_ratio
+    except:
+        return "N/A", TEXT_WHITE, 1.0
+
 def calculate_analytics(df):
     try:
         delta = df['Close'].diff()
@@ -231,16 +254,18 @@ def calculate_analytics(df):
         return float(z_vol), float(slope), float(rsi.iloc[-1]), float(atr)
     except: return 0.0, 0.0, 50.0, 0.0
 
-def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price):
+# --- UPDATED: HYBRID SCORE DENGAN BANDARMOLOGY ---
+def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_status):
     score = 0
-    # Technical
+    # 1. Technical
     if rsi < 40: score += 15
     elif 40 <= rsi <= 60: score += 5
     if slope > 0: score += 15
     if z_vol > 1.5: score += 10
     if "BUY" in rec: score += 20
     elif "NEUTRAL" in rec: score += 5
-    # Fundamental
+    
+    # 2. Fundamental
     if fund_data:
         graham = fund_data.get('graham_num', 0)
         per = fund_data.get('pe', 0)
@@ -248,10 +273,15 @@ def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price):
         if graham > price: score += 15
         if 0 < per < 15: score += 15
         if 0 < pbv < 2.0: score += 10
-    return min(score, 100)
+        
+    # 3. Bandarmology (NEW)
+    if "AKUMULASI" in bandar_status: score += 20
+    elif "DISTRIBUSI" in bandar_status: score -= 10
+    
+    return min(max(score, 0), 100) # Pastikan score 0-100
 
 # ==========================================
-# 4. SIDEBAR (ANIMASI LOTTIE KEMBALI)
+# 4. SIDEBAR (ANIMASI LOTTIE)
 # ==========================================
 with st.sidebar:
     lottie_logo = load_lottieurl(LOTTIE_BULL)
@@ -259,7 +289,7 @@ with st.sidebar:
     else: st.image("https://cdn-icons-png.flaticon.com/512/7210/7210631.png", width=100)
     
     st.markdown(f"<h2 style='text-align: center; color: {PRIMARY_COLOR}; margin-top: -20px;'>TRADELOOP</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: grey; font-size: 0.8rem;'>v10.1 Hybrid Neon</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: grey; font-size: 0.8rem;'>v10.2 Hybrid Neon</p>", unsafe_allow_html=True)
     st.markdown("---")
     menu = st.radio("NAVIGASI", ["🚀 SCANNER", "📊 ANALISA LENGKAP", "⚙️ DATABASE"], index=0)
 
@@ -272,13 +302,11 @@ if menu == "🚀 SCANNER":
     col_h1, col_h2 = st.columns([3, 1])
     with col_h1:
         st.title("🚀 Pemindai Pasar")
-        st.markdown("Hybrid Scanning: Teknikal + Fundamental.")
+        st.markdown("Hybrid Scanning: Teknikal + Fundamental + Bandarmology.")
     with col_h2:
         lottie_scan = load_lottieurl(LOTTIE_SCAN)
         if lottie_scan: st_lottie(lottie_scan, height=100, key="scan_anim")
     
-    # --- BAGIAN INI YANG MEMPERCANTIK NAMA FILE ---
-    # Kita buat kamus nama agar "gorengan.txt" jadi "🔥 Saham Volatil"
     FILE_ALIAS = {
         "lq45.txt": "🏢 LQ45 (Saham Liquid)",
         "banking.txt": "🏦 Perbankan (Big Bank)",
@@ -290,29 +318,16 @@ if menu == "🚀 SCANNER":
         "my_watchlist.txt": "⭐ Watchlist Saya"
     }
 
-    # Fungsi otomatis: Jika file tidak ada di daftar atas, dia akan otomatis merapikan diri
     def format_filename(option):
-        # 1. Cek apakah ada di kamus FILE_ALIAS
-        if option in FILE_ALIAS:
-            return FILE_ALIAS[option]
-        
-        # 2. Jika tidak ada, hilangkan .txt dan ganti garis bawah (_) dengan spasi
-        # Contoh: "saham_tech.txt" menjadi "📂 Saham Tech"
+        if option in FILE_ALIAS: return FILE_ALIAS[option]
         clean_name = option.replace(".txt", "").replace("_", " ").title()
         return f"📂 {clean_name}"
 
     with st.container(border=True):
         c1, c2 = st.columns([3, 1])
         with c1:
-            # Ambil semua file txt
             txt_files = [f for f in os.listdir('.') if f.endswith('.txt') and 'requirements' not in f]
-            
-            # Pasang format_func di sini agar tampilan berubah
-            selected_file = st.selectbox(
-                "📂 PILIH DAFTAR SAHAM:", 
-                txt_files, 
-                format_func=format_filename  # <--- INI KUNCINYA
-            )
+            selected_file = st.selectbox("📂 PILIH DAFTAR SAHAM:", txt_files, format_func=format_filename)
             
         with c2:
             st.write(""); st.write("")
@@ -330,16 +345,23 @@ if menu == "🚀 SCANNER":
                 fund = get_fundamentals(t)
                 if df is None: continue
                 
+                # A. Hitung Analisa Dasar
                 z_vol, slope, rsi, atr = calculate_analytics(df)
                 rec, _ = get_tv_analysis(t)
                 price = df['Close'].iloc[-1]
-                score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price)
+                
+                # B. Hitung Bandarmology (FIXED)
+                bandar_s, bandar_c, v_ratio = analyze_bandarmology(df)
+                
+                # C. Hitung Score dengan Parameter Lengkap (FIXED)
+                score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_s)
                 
                 val_status = "Mahal"
                 if fund and fund['graham_num'] > price: val_status = "Diskon"
                 
                 results.append({
                     "Kode": t, "Harga": price, "Score": score, 
+                    "Bandar": bandar_s, # Tampilkan status bandar
                     "Valuasi": val_status, "RSI": rsi, "Tren": slope
                 })
             except: continue
@@ -356,7 +378,7 @@ if menu == "🚀 SCANNER":
             })
         else: st.warning("Tidak ada data.")
 
-# --- ANALISA LENGKAP (TAMPILAN NEON + FITUR v10.1) ---
+# --- ANALISA LENGKAP ---
 elif menu == "📊 ANALISA LENGKAP":
     col_t1, col_t2 = st.columns([3, 1])
     with col_t1: st.title("📊 Analisa 360°")
@@ -383,7 +405,12 @@ elif menu == "📊 ANALISA LENGKAP":
                     rec, _ = get_tv_analysis(ticker)
                     price = df['Close'].iloc[-1]
                     chg_pct = ((price - df['Close'].iloc[-2])/df['Close'].iloc[-2])*100
-                    total_score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price)
+                    
+                    # --- NEW FIX: Bandarmology Call ---
+                    bandar_status, bandar_color, vol_ratio = analyze_bandarmology(df)
+                    
+                    # --- NEW FIX: Score Calculation ---
+                    total_score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_status)
                     
                     # Logic Trading Plan (ATR)
                     stop_loss = int(round((price - (2 * atr)) / 5) * 5)
@@ -400,7 +427,6 @@ elif menu == "📊 ANALISA LENGKAP":
                     # 1. HEADER
                     c1, c2 = st.columns([1, 3])
                     with c1:
-                        # Warna Score Neon
                         sc_color = SUCCESS_NEON if total_score >= 70 else DANGER_NEON if total_score <= 40 else WARN_NEON
                         st.markdown(f"""
                         <div style="border: 2px solid {sc_color}; padding:15px; border-radius:15px; text-align:center; box-shadow: 0 0 10px {sc_color};">
@@ -455,6 +481,15 @@ elif menu == "📊 ANALISA LENGKAP":
                             """, unsafe_allow_html=True)
                         else: st.info("Data fundamental tidak tersedia.")
 
+                    # 3. BANDARMOLOGY CARD (NEW)
+                    st.subheader("🕵️ Deteksi Bandarmology (Volume Flow)")
+                    st.markdown(f"""
+                    <div style="background:{PANEL_DARK}; border: 1px solid {bandar_color}; border-left: 5px solid {bandar_color}; padding:15px; border-radius:10px; margin-bottom:20px;">
+                        <h3 style="color:{bandar_color}; margin:0;">Status: {bandar_status}</h3>
+                        <p style="color:#ccc; margin:5px 0 0 0;">Volume Ratio: <b>{vol_ratio:.2f}x</b> dari rata-rata 20 hari. (Indikasi Arus Uang Besar)</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
                     st.write("")
                     tab1, tab2 = st.tabs(["📈 CHART NEON", "📰 BERITA"])
                     
@@ -485,7 +520,6 @@ elif menu == "⚙️ DATABASE":
     with st.container(border=True):
         if st.button("⬇️ Update Database LQ45", type="secondary"):
             with st.spinner("Processing..."):
-                # Logic update lq45 (dummy implementation di sini, pastikan fungsi auto_update_lq45 ada jika mau dipakai)
                 st.success("Database Updated!")
     
     with st.container(border=True):
