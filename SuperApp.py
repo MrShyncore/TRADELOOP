@@ -171,24 +171,41 @@ def get_tv_analysis(ticker):
 
 def get_news(ticker):
     try:
+        # KITA TAMBAHKAN SUMBER TERPERCAYA BARU (Bisnis.com & Emitennews)
         sources = (
-            "site:cnbcindonesia.com OR site:kontan.co.id OR site:investor.id OR "
-            "site:bisnis.com OR site:emitennews.com OR site:idx.co.id"
+            "site:cnbcindonesia.com OR "
+            "site:kontan.co.id OR "
+            "site:investor.id OR "
+            "site:bisnis.com OR "     # Bagus untuk info sektor/industri
+            "site:emitennews.com OR " # Cepat untuk info RUPS/Dividen
+            "site:idx.co.id"          # Sumber resmi
         )
+        
+        # Query Google News
         query = f"Saham {ticker} ({sources})"
         url = f"https://news.google.com/rss/search?q={query}&hl=id-ID&gl=ID&ceid=ID:id"
+        
         resp = requests.get(url, timeout=4)
         root = ET.fromstring(resp.content)
         news = []
-        for item in root.findall('./channel/item')[:7]:
+        
+        for item in root.findall('./channel/item')[:7]: # Ambil 7 berita terbaru
             raw_title = item.find('title').text
-            clean_title = raw_title.split(' - ')[0] if raw_title else "Berita"
+            clean_title = raw_title.split(' - ')[0] if raw_title else "Berita Saham"
+            
+            # Membersihkan nama source agar rapi di UI
             src_raw = item.find('source').text if item.find('source') is not None else "News"
-            src_clean = src_raw.replace("CNBC Indonesia", "CNBC").replace("Bisnis.com", "Bisnis")
-            news.append({'title': clean_title, 'link': item.find('link').text, 'pubDate': item.find('pubDate').text, 'source': src_clean})
+            src_clean = src_raw.replace("CNBC Indonesia", "CNBC").replace("Bisnis.com", "Bisnis").replace("KONTAN", "Kontan")
+            
+            news.append({
+                'title': clean_title, 
+                'link': item.find('link').text, 
+                'pubDate': item.find('pubDate').text, 
+                'source': src_clean
+            })
         return news
     except: return []
-
+    
 def calculate_analytics(df):
     try:
         delta = df['Close'].diff()
