@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+yfinance
+plotly
+requests
+tradingview_ta
+matplotlib
+lxml
