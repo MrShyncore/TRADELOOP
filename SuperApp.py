@@ -174,6 +174,8 @@ def get_fundamentals(ticker):
             "book_value": info.get('bookValue', 0),
             "growth": info.get('earningsGrowth', 0) or 0,
             "der": info.get('debtToEquity', 0) or 0, # Debt to Equity
+            "current_ratio": info.get('currentRatio', 0) or 0, # NEW: Likuiditas
+            "revenue_growth": info.get('revenueGrowth', 0) or 0, # NEW: Pertumbuhan Omzet
             "peg": info.get('pegRatio', 0) or 0,     # PEG Growth
             "npm": info.get('profitMargins', 0) or 0, # Net Profit Margin
             "summary": info.get('longBusinessSummary', '-')
@@ -255,7 +257,7 @@ def calculate_analytics(df):
     try:
         # 1. Bersihkan Data
         df = df.replace([np.inf, -np.inf], np.nan).dropna()
-        if len(df) < 50: return 0.0, 0.0, 50.0, 0.0, "N/A" # Return N/A jika data kurang
+        if len(df) < 50: return 0.0, 0.0, 50.0, 0.0, "N/A", 0.0 # <--- PERBAIKAN: Return 6 data default
 
         # 2. RSI Logic
         delta = df['Close'].diff()
@@ -272,20 +274,41 @@ def calculate_analytics(df):
         tr = np.max(pd.concat([df['High']-df['Low'], np.abs(df['High']-df['Close'].shift()), np.abs(df['Low']-df['Close'].shift())], axis=1), axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
         
-        # 5. NEW: MA TREND LOGIC (Golden Cross Check)
+        # 5. MA TREND LOGIC
         ma50 = df['Close'].rolling(window=50).mean().iloc[-1]
         ma200 = df['Close'].rolling(window=200).mean().iloc[-1] if len(df) > 200 else 0
         
         trend_status = "SIDEWAYS"
         if ma50 > ma200 and ma200 > 0: trend_status = "BULLISH (UPTREND)"
         elif ma50 < ma200 and ma200 > 0: trend_status = "BEARISH (DOWNTREND)"
-        
-        # PERHATIKAN: Ada 5 nilai yang dikembalikan (tambah trend_status)
-        return float(z_vol), float(slope), float(rsi.iloc[-1]), float(atr), trend_status
-    except: return 0.0, 0.0, 50.0, 0.0, "N/A"
 
-# --- UPDATED: HYBRID SCORE DENGAN BANDARMOLOGY ---
-def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_status, trend_status):
+        # 6. NEW: CAGR (Compound Annual Growth Rate)
+        days = (df.index[-1] - df.index[0]).days
+        years = days / 365.25
+        if years > 0:
+            cagr = (df['Close'].iloc[-1] / df['Close'].iloc[0]) ** (1/years) - 1
+        else:
+            cagr = 0.0
+        
+        # Rumus: Close naik = Vol Ditambah. Close turun = Vol Dikurang.
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+        
+        # Hitung Kemiringan (Slope) OBV 10 hari terakhir
+        # Tujuannya: Melihat apakah arus uang sedang masuk (Positif) atau keluar (Negatif)
+        obv_slope = np.polyfit(np.arange(10), df['OBV'].tail(10).values, 1)[0]
+        
+        # Normalisasi (Supaya saham volume kecil & besar bisa dibandingkan)
+        avg_vol = df['Volume'].mean()
+        norm_obv = obv_slope / avg_vol if avg_vol != 0 else 0
+
+        # Return ditambahkan: norm_obv
+        return float(z_vol), float(slope), float(rsi.iloc[-1]), float(atr), trend_status, float(cagr), float(norm_obv)
+
+    except: 
+        # Return Error harus 7 data juga
+        return 0.0, 0.0, 50.0, 0.0, "N/A", 0.0, 0.0
+
+def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_status, trend_status, cagr, obv_score):
     score = 0
     try:
         # 1. TEKNIKAL & TREND (Bobot 40%)
@@ -293,7 +316,7 @@ def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_stat
         elif 40 <= rsi <= 60: score += 5
         if slope > 0: score += 10
         if z_vol > 1.5: score += 5
-        if "BULLISH" in trend_status: score += 15 # Poin plus untuk Uptrend
+        if "BULLISH" in trend_status: score += 15
         if rec and "BUY" in rec: score += 10
         
         # 2. FUNDAMENTAL & KESEHATAN (Bobot 40%)
@@ -301,29 +324,104 @@ def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_stat
             graham = fund_data.get('graham_num', 0)
             pbv = fund_data.get('pbv', 0)
             roe = fund_data.get('roe', 0)
-            der = fund_data.get('der', 0) # Debt to Equity
+            der = fund_data.get('der', 0)
             
             # Valuasi
             if graham > price: score += 10
             if 0 < pbv < 2.0: score += 5
             
-            # Profitabilitas
+            # Profitabilitas & Pertumbuhan (NEW: CAGR)
             if roe > 0.15: score += 10
+            if cagr > 0.10: score += 5 # Bonus poin jika tumbuh >10% per tahun
             
-            # --- FIX LOGIKA DER ---
-            # Jika data > 10, anggap itu persen (contoh 50), jadi bagi 100 biar jadi 0.5
+            # Kesehatan (Safety) - FIX LOGIKA DER
             real_der = der / 100 if der > 10 else der
+            if 0 < real_der < 1.0: score += 10
+            elif real_der > 2.0: score -= 10
             
-            # Kesehatan (Safety)
-            if 0 < real_der < 1.0: score += 10  # Utang kecil = Bagus
-            elif real_der > 2.0: score -= 10    # Utang besar = Bahaya
+            # Likuiditas (NEW: Current Ratio)
+            cr = fund_data.get('current_ratio', 0)
+            if cr > 1.5: score += 5 # Bonus poin jika likuiditas sangat aman
             
         # 3. BANDARMOLOGY (Bobot 20%)
         if "AKUMULASI" in bandar_status: score += 15
         elif "DISTRIBUSI" in bandar_status: score -= 10
+        
+        # Jika OBV Naik Signifikan (Arus uang deras)
+        if obv_score > 0.2: score += 10
+        
+        # SUPER SIGNAL: Bullish Divergence
+        # Harga sedang turun/sideways (Slope <= 0), TAPI OBV Malah Naik (obv_score > 0)
+        # Artinya: Ritel jualan panik, Bandar nampung diam-diam.
+        if slope <= 0 and obv_score > 0.05:
+            score += 15 
+        
+        # --- 4. [BARU] SAFETY PENALTY (Denda Risiko) ---
+        # Bagian ini yang akan menyaring saham "busuk"
+        
+        # A. Denda Saham Gocap (Tidur)
+        # Saham di bawah Rp 55 sangat berisiko susah dijual (likuiditas macet)
+        if price < 55:
+            score -= 30 
             
+        # B. Denda Fundamental Hancur
+        if fund_data:
+            eps = fund_data.get('eps', 0)
+            # Perusahaan Rugi (EPS Minus)
+            if eps < 0: 
+                score -= 15
+            
+            # Utang Ugal-ugalan (DER > 3x atau 300%)
+            real_der = fund_data.get('der', 0)
+            real_der = real_der / 100 if real_der > 10 else real_der
+            if real_der > 3.0:
+                score -= 20
+                
     except: pass
+    
+    # Pastikan skor tidak di bawah 0 dan tidak di atas 100
     return min(max(score, 0), 100)
+        
+# --- FIX: EXECUTIVE SUMMARY (HANDLE NETRAL) ---
+def get_executive_summary(score, trend, bandar, val_status, roe, der):
+    summary = []
+    
+    # 1. Kesimpulan Utama
+    if score >= 75:
+        summary.append(f"🔥 **KESIMPULAN: STRONG BUY.** Saham ini memiliki momentum sangat kuat.")
+    elif score >= 60:
+        summary.append(f"✅ **KESIMPULAN: BUY ON WEAKNESS.** Potensi bagus, tapi tunggu koreksi sedikit.")
+    elif score >= 40:
+        summary.append(f"⚖️ **KESIMPULAN: WAIT & SEE.** Belum ada sinyal kuat, pasar masih ragu.")
+    else:
+        summary.append(f"⛔ **KESIMPULAN: HINDARI (AVOID).** Risiko terlalu tinggi saat ini.")
+    
+    # 2. Alasan Pendukung (Storytelling)
+    reasons = []
+    
+    # Alasan 1: Tren
+    if "BULLISH" in trend: reasons.append("tren harga sedang NAIK (Uptrend)")
+    else: reasons.append("tren harga sedang TURUN/LEMAH")
+    
+    # Alasan 2: Bandar (INI YANG TADINYA ERROR)
+    if "AKUMULASI" in bandar: reasons.append("terdeteksi adanya AKUMULASI")
+    elif "DISTRIBUSI" in bandar: reasons.append("terdeteksi adanya DISTRIBUSI (Buangan Barang)")
+    else: reasons.append("aliran dana terlihat NETRAL") # <--- SUDAH DIPERBAIKI
+    
+    # Alasan 3: Valuasi
+    if "Murah" in val_status or "Diskon" in val_status: reasons.append("valuasi harga tergolong MURAH")
+    else: reasons.append("valuasi harga sudah MAHAL/WAJAR")
+    
+    # 3. Peringatan Risiko
+    warnings = []
+    if der > 2.0: warnings.append("⚠️ Hati-hati! Utang perusahaan sangat besar (DER > 2x).")
+    if roe < 0.05: warnings.append("⚠️ Profitabilitas perusahaan sangat rendah (ROE < 5%).")
+    
+    # Rangkai Kalimat
+    # Sekarang aman karena reasons pasti punya index 0, 1, dan 2
+    text = f"{summary[0]} Secara teknikal {reasons[0]}, dan {reasons[1]}. Dari sisi fundamental, {reasons[2]}."
+    
+    return text, warnings
         
 # ==========================================
 # 4. SIDEBAR (ANIMASI LOTTIE)
@@ -331,24 +429,26 @@ def calculate_hybrid_score(rsi, slope, z_vol, rec, fund_data, price, bandar_stat
 with st.sidebar:
     st.image("Gemini_Generated_Image.png", width=100)
 
-    st.markdown("---")
-    with st.expander("🧮 Kalkulator Money Management", expanded=False):
-        modal = st.number_input("Modal Total (Rp):", value=10000000, step=1000000)
-        risk_pct = st.number_input("Resiko per Trade (%):", value=2.0, step=0.5)
-        entry_price = st.number_input("Harga Beli:", value=0)
-        sl_price = st.number_input("Harga Stop Loss:", value=0)
+    with st.expander("🧮 Kelly Criterion (Money Management)", expanded=False):
+        st.caption("Hitung ukuran posisi (Lot) optimal secara matematis.")
         
-        if st.button("Hitung Lot"):
-            if entry_price > sl_price and entry_price > 0:
-                max_loss_rp = modal * (risk_pct / 100)
-                loss_per_share = entry_price - sl_price
-                max_shares = max_loss_rp / loss_per_share
-                max_lots = int(max_shares / 100)
-                
-                st.success(f"✅ Beli Maksimal: **{max_lots} Lot**")
-                st.caption(f"Resiko Hilang: Rp {max_loss_rp:,.0f} jika kena SL.")
+        modal_total = st.number_input("Total Modal (Rp):", value=10000000, step=1000000)
+        win_rate = st.slider("Win Rate Strategi (%):", 30, 90, 50) / 100
+        risk_reward = st.number_input("Risk/Reward Ratio (misal 1:2 isi 2):", value=2.0)
+        
+        if st.button("Hitung Kelly"):
+            # Rumus Kelly: K% = W - [(1-W) / R]
+            kelly_pct = win_rate - ((1 - win_rate) / risk_reward)
+            safe_kelly = kelly_pct / 2 # Pakai Half-Kelly biar aman (konservatif)
+            
+            if kelly_pct > 0:
+                modal_entry = modal_total * safe_kelly
+                st.success(f"🎯 Alokasi: **{safe_kelly*100:.1f}%** Modal")
+                st.markdown(f"Beli senilai: **Rp {modal_entry:,.0f}**")
+                st.caption("Note: Menggunakan Half-Kelly untuk keamanan.")
             else:
-                st.error("Harga SL harus di bawah Harga Beli!")
+                st.error("⛔ Statistik Buruk! Jangan Trading.")
+                st.caption("Win Rate/Reward terlalu kecil. Anda akan rugi jangka panjang.")
     
     st.markdown(f"<h2 style='text-align: center; color: {PRIMARY_COLOR}; margin-top: -20px;'>TRADELOOP</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: grey; font-size: 0.8rem;'>v10.2 Hybrid Neon</p>", unsafe_allow_html=True)
@@ -408,13 +508,13 @@ if menu == "🚀 SCANNER":
                 if df is None: continue
                 
                 # A. Hitung Analisa Dasar           
-                z_vol, slope, rsi, atr, trend_stat = calculate_analytics(df) 
+                z_vol, slope, rsi, atr, trend_stat, cagr, obv_val = calculate_analytics(df) 
                 rec, _ = get_tv_analysis(t)
                 price = df['Close'].iloc[-1]
                 bandar_s, bandar_c, v_ratio = analyze_bandarmology(df)
                 
                 # 2. Masukkan trend_stat ke calculation
-                score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_s, trend_stat)
+                score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_s, trend_stat, cagr, obv_val)
                 
                 # LOGIKA STATUS GRAHAM (NEW)
                 graham = fund['graham_num'] if fund else 0
@@ -482,38 +582,105 @@ elif menu == "📊 ANALISA LENGKAP":
         with c_in: ticker = st.text_input("KODE SAHAM:", placeholder="Contoh: BBCA").upper().strip()
         with c_go: 
             st.write(""); st.write("")
-            analyze = st.button("ANALISA HYBRID", use_container_width=True)
+            analyze = st.button("ANALISA", use_container_width=True)
             
     if analyze and ticker:
-        with st.spinner("Menghubungkan Neural Network..."):
+        with st.spinner("Mengunyah data pasar..."):
             try:
                 df = get_stock_data(ticker, period="2y")
                 fund = get_fundamentals(ticker)
                 
                 if df is not None:
-                    # Logic Processing
-                    z_vol, slope, rsi, atr, trend_stat = calculate_analytics(df)
+                    # --- PROSES DATA ---
+                    z_vol, slope, rsi, atr, trend_stat, cagr, obv_val = calculate_analytics(df) # <-- Pastikan ada cagr
                     rec, _ = get_tv_analysis(ticker)
                     price = df['Close'].iloc[-1]
                     chg_pct = ((price - df['Close'].iloc[-2])/df['Close'].iloc[-2])*100
-                    
-                    # --- NEW FIX: Bandarmology Call ---
                     bandar_status, bandar_color, vol_ratio = analyze_bandarmology(df)
                     
-                    # --- NEW FIX: Score Calculation ---
-                    total_score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_status, trend_stat)
+                    # Hitung Total Score
+                    total_score = calculate_hybrid_score(rsi, slope, z_vol, rec, fund, price, bandar_status, trend_stat, cagr, obv_val)
                     
-                    # Logic Trading Plan (ATR)
+                    # Logic Trading Plan
                     stop_loss = int(round((price - (2 * atr)) / 5) * 5)
                     tp1 = int(round((price + (2 * atr)) / 5) * 5)
                     tp2 = int(round((price + (4 * atr)) / 5) * 5)
                     risk_pct = ((price - stop_loss) / price) * 100
                     
-                    # Logic Fundamental
+                    # Logic Valuasi Text
                     graham = fund['graham_num'] if fund else 0
-                    diskon = ((graham - price) / graham) * 100 if graham > 0 else 0
+                    if graham > 0:
+                        diskon = ((graham - price) / graham) * 100
+                        if diskon >= 50: val_text = "💎 Super Murah"
+                        elif 20 <= diskon < 50: val_text = "✅ Diskon"
+                        elif -10 <= diskon < 20: val_text = "⚖️ Wajar"
+                        else: val_text = "⛔ Mahal"
+                    else: val_text = "⚠️ N/A"
+
+                    # --- UI BARU: EXECUTIVE SUMMARY ---
+                    # Panggil fungsi kesimpulan yang baru kita buat
+                    roe_val = fund['roe'] if fund else 0
+                    der_val = fund['der'] if fund else 0
+                    if der_val > 10: der_val = der_val/100 # Normalisasi DER
                     
-                    # --- UI LAYOUT NEON ---
+                    summary_text, warning_list = get_executive_summary(total_score, trend_stat, bandar_status, val_text, roe_val, der_val)
+                    
+                    # TAMPILAN HEADER (Skor + Kesimpulan)
+                    st.markdown(f"## {ticker} - Rp {price:,.0f} ({chg_pct:+.2f}%)")
+                    
+                    # Kotak Kesimpulan (Highlight)
+                    bg_summary = "rgba(0, 255, 171, 0.1)" if total_score >= 60 else "rgba(255, 46, 99, 0.1)"
+                    border_summary = SUCCESS_NEON if total_score >= 60 else DANGER_NEON
+                    
+                    st.markdown(f"""
+                    <div style="background:{bg_summary}; border: 1px solid {border_summary}; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                        <h3 style="margin-top:0; color:{border_summary};">🤖 AI Conclusion:</h3>
+                        <p style="font-size: 1.1em; color: white;">{summary_text}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    if warning_list:
+                        for w in warning_list: st.warning(w)
+
+                    # --- VISUAL DATA (Kiri: Chart, Kanan: Data Padat) ---
+                    col_chart, col_data = st.columns([2, 1])
+                    
+                    with col_chart:
+                        # Tampilkan Chart Neon
+                        ma50 = df['Close'].rolling(50).mean()
+                        ma200 = df['Close'].rolling(200).mean()
+                        fig = go.Figure()
+                        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name=ticker, increasing_line_color=SUCCESS_NEON, decreasing_line_color=DANGER_NEON))
+                        fig.add_trace(go.Scatter(x=df.index, y=ma50, line=dict(color='orange', width=1), name='MA 50'))
+                        fig.add_trace(go.Scatter(x=df.index, y=ma200, line=dict(color='blue', width=1), name='MA 200'))
+                        fig.update_layout(title=f"Trend Chart {ticker}", template="plotly_dark", height=450, xaxis_rangeslider_visible=False, margin=dict(l=0, r=0, t=30, b=0))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with col_data:
+                        st.subheader("🔢 Data Breakdown")
+                        
+                        # TABEL DATA TEKNIKAL
+                        st.markdown("###### 📡 Indikator Teknikal")
+                        st.dataframe(pd.DataFrame({
+                            "Indikator": ["Hybrid Score", "Tren Arah", "RSI (Momentum)", "Bandar Flow", "Volatilitas (ATR)"],
+                            "Nilai": [f"{total_score}/100", trend_stat, f"{rsi:.1f}", bandar_status, f"{atr:.0f}"]
+                        }).set_index('Indikator'), use_container_width=True)
+                        
+                        # TABEL DATA FUNDAMENTAL
+                        st.markdown("###### 🏢 Indikator Fundamental")
+                        if fund:
+                             st.dataframe(pd.DataFrame({
+                                "Rasio": ["Valuasi (Graham)", "Kewajaran Harga", "Profitabilitas (ROE)", "Utang (DER)", "Likuiditas (CR)"],
+                                "Nilai": [f"Rp {graham:,.0f}", val_text, f"{roe_val*100:.1f}%", f"{der_val:.2f}x", f"{fund.get('current_ratio',0):.2f}x"]
+                            }).set_index('Rasio'), use_container_width=True)
+
+                    # --- TRADING PLAN (Di Bawah) ---
+                    st.markdown("---")
+                    st.subheader("🎯 Rencana Trading (Action Plan)")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("🛑 Stop Loss (SL)", f"Rp {stop_loss:,.0f}", f"-{risk_pct:.1f}%", delta_color="inverse")
+                    c2.metric("📍 Entry Price", f"Rp {price:,.0f}", "Current")
+                    c3.metric("🚀 Take Profit (TP)", f"Rp {tp2:,.0f}", f"Ratio 1:2")
                     
                     # 1. HEADER
                     c1, c2 = st.columns([1, 3])
@@ -530,77 +697,6 @@ elif menu == "📊 ANALISA LENGKAP":
                         if fund: st.caption(f"{fund['name']} | Sektor: {fund['sector']}")
 
                     st.markdown("---")
-
-                    # 2. DUAL CARD (NEON STYLE)
-                    col_tech, col_fund = st.columns(2)
-                    
-                    with col_tech:
-                        st.subheader("🎯 Eksekusi (Teknikal)")
-                        st.markdown(f"""
-                        <div class="plan-card" style="border-left-color: {DANGER_NEON};">
-                            <strong style="color:{DANGER_NEON}">🛑 Stop Loss (SL)</strong><br>
-                            <span style="font-size:1.4em; color:white;">Rp {stop_loss:,.0f}</span> <small style="color:grey">(-{risk_pct:.1f}%)</small>
-                        </div>
-                        <div class="plan-card" style="border-left-color: {WARN_NEON};">
-                            <strong style="color:{WARN_NEON}">📍 Entry Area</strong><br>
-                            <span style="font-size:1.4em; color:white;">Rp {price:,.0f}</span>
-                        </div>
-                        <div class="plan-card" style="border-left-color: {SUCCESS_NEON};">
-                            <strong style="color:{SUCCESS_NEON}">🚀 Take Profit (TP)</strong><br>
-                            <span style="font-size:1.4em; color:white;">Rp {tp1:,.0f} - {tp2:,.0f}</span>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                    with col_fund:
-                        st.subheader("🏢 Kesehatan & Valuasi")
-                        if fund:
-                            # Normalisasi DER (kadang data persen, kadang desimal)
-                            der_val = fund['der'] / 100 if fund['der'] > 10 else fund['der']
-                            der_safe = "✅ AMAN" if der_val < 1 else "⚠️ WASPADA" if der_val < 2 else "☠️ BAHAYA"
-                            der_color = SUCCESS_NEON if der_val < 1 else DANGER_NEON
-                            # LOGIKA STATUS DETAIL
-                            graham = fund['graham_num'] if fund else 0
-                            if graham > 0:
-                                diskon = ((graham - price) / graham) * 100
-                                if diskon >= 50: 
-                                    g_stat, g_color = "💎 SUPER MURAH", SUCCESS_NEON
-                                elif 20 <= diskon < 50: 
-                                    g_stat, g_color = "✅ DISKON AMAN", SUCCESS_NEON
-                                elif -10 <= diskon < 20: 
-                                    g_stat, g_color = "⚖️ HARGA WAJAR", WARN_NEON
-                                else: 
-                                    g_stat, g_color = "⛔ MAHAL", DANGER_NEON
-                            else:
-                                diskon = 0
-                                g_stat, g_color = "⚠️ DATA MINUS", DANGER_NEON
-                            
-                            st.markdown(f"""
-                            <div class="fund-card" style="border-right-color: {der_color};">
-                                <strong style="color:{der_color}">🏥 Kesehatan (DER)</strong><br>
-                                <span style="font-size:1.4em; color:white;">{der_val:.2f}x</span><br>
-                                <small>Status: {der_safe}</small>
-                            </div>
-                            <div class="fund-card" style="border-right-color: {PRIMARY_COLOR};">
-                                <strong>💎 Profitabilitas (ROE)</strong><br>
-                                <span style="color:white">{fund['roe']*100:.1f}%</span> <small>(PEG: {fund.get('peg', 0):.2f}x)</small>
-                            </div>
-                            <div class="fund-card" style="border-right-color: {g_color};">
-                                <strong style="color:{g_color}">⚖️ Nilai Wajar (Graham)</strong><br>
-                                <span style="font-size:1.4em; color:white;">Rp {graham:,.0f}</span><br>
-                                <small>{g_stat} ({diskon:+.1f}%)</small>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        else: st.info("Data fundamental tidak tersedia.")
-
-                    # 3. BANDARMOLOGY CARD (NEW)
-                    st.subheader("🕵️ Deteksi Bandarmology (Volume Flow)")
-                    st.markdown(f"""
-                    <div style="background:{PANEL_DARK}; border: 1px solid {bandar_color}; border-left: 5px solid {bandar_color}; padding:15px; border-radius:10px; margin-bottom:20px;">
-                        <h3 style="color:{bandar_color}; margin:0;">Status: {bandar_status}</h3>
-                        <p style="color:#ccc; margin:5px 0 0 0;">Volume Ratio: <b>{vol_ratio:.2f}x</b> dari rata-rata 20 hari. (Indikasi Arus Uang Besar)</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
                     st.write("")
                     tab1, tab2 = st.tabs(["📈 CHART NEON", "📰 BERITA"])
                     
@@ -658,105 +754,109 @@ elif menu == "⚙️ DATABASE":
                 with open(file_to_edit, "w") as f: f.write(new)
                 st.toast("Tersimpan!", icon="✅")
 
-# --- PANDUAN PENGGUNA ---
+# --- PANDUAN PENGGUNA (V10.2 UPDATED) ---
 elif menu == "📚 PANDUAN":
     col_p1, col_p2 = st.columns([3, 1])
     with col_p1:
-        st.title("📘 Panduan & Kamus Istilah")
-        st.markdown("Pelajari cara membaca sinyal dan arti indikator di TradeLoop.")
+        st.title("📘 Panduan TradeLoop v10.2")
+        st.markdown("Dokumentasi lengkap fitur baru: **AI Summary**, **Kelly Criterion**, & **Advanced Metrics**.")
     with col_p2:
         st.image("https://cdn-icons-png.flaticon.com/512/2666/2666505.png", width=80)
 
     st.write("")
 
-    # --- BAGIAN 1: CARA PAKAI ---
-    with st.expander("🚀 Cara Menggunakan SCANNER", expanded=True):
+    # 1. FITUR BARU (HIGHLIGHT)
+    st.info("💡 **Update v10.2:** Sekarang dilengkapi dengan **AI Executive Summary** yang menerjemahkan angka rumit menjadi kalimat bahasa manusia + **Money Management** Pro.")
+
+    # 2. CARA PENGGUNAAN UTAMA
+    with st.expander("🤖 Cara Membaca AI Executive Summary (Baru!)", expanded=True):
         st.markdown("""
-        **Fungsi:** Menyaring ratusan saham secara otomatis untuk menemukan yang potensial.
+        Di menu **Analisa Lengkap**, Anda akan melihat kotak kesimpulan di bagian atas. Ini artinya:
         
-        1. **Pilih Daftar Saham:** Gunakan dropdown untuk memilih kelompok saham (misal: *LQ45* atau *Watchlist Saya*).
-        2. **Klik Mulai Scan:** Tunggu proses berjalan. Aplikasi akan mengambil data 2 tahun terakhir.
-        3. **Baca Hasil:**
-            * **Score:** Nilai 0-100. Semakin tinggi semakin bagus (Target > 70).
-            * **Trend:** Pastikan statusnya **BULLISH** (Harga di atas rata-rata 200 hari).
-            * **Valuasi:** *Diskon* artinya harga sekarang di bawah nilai wajarnya.
-            * **DER:** Pastikan centang hijau (✅), artinya utang aman.
+        * 🔥 **STRONG BUY (Skor > 75):** Momentum sangat kuat. Teknikal Uptrend + Bandar Akumulasi + Fundamental Sehat.
+        * ✅ **BUY ON WEAKNESS (Skor > 60):** Tren bagus, tapi mungkin harga sudah naik agak tinggi. Disarankan antri beli di bawah (saat koreksi).
+        * ⚖️ **WAIT & SEE (Skor 40-60):** Pasar sedang bingung (Sideways) atau indikator bertentangan. Lebih baik pantau dulu (Watchlist).
+        * ⛔ **AVOID (Skor < 40):** Jangan masuk! Risiko tinggi. Tren sedang turun atau Bandar sedang jualan (Distribusi).
         """)
 
-    with st.expander("📊 Cara Membaca ANALISA LENGKAP"):
+    with st.expander("🧮 Cara Pakai Money Management (Kelly Criterion)"):
         st.markdown("""
-        **Fungsi:** Bedah tuntas satu emiten dari segala sisi (360° Analysis).
+        Fitur ini ada di **Sidebar** (menu kiri). Tujuannya agar Anda tidak asal "All-in" dan bangkrut.
         
-        * **Hybrid Score:** Gabungan nilai Teknikal + Fundamental + Bandarmology.
-        * **Trading Plan:**
-            * 🛑 **Stop Loss (SL):** Titik keluar jika analisa salah (untuk membatasi rugi).
-            * 📍 **Entry Area:** Harga yang disarankan untuk beli.
-            * 🚀 **Take Profit (TP):** Target harga jual untuk ambil untung.
-        * **Chart:** Garis **Oranye (MA50)** dan **Biru (MA200)** menunjukkan tren. Jika Oranye di atas Biru = Uptrend (Bagus).
+        1.  **Win Rate:** Masukkan perkiraan seberapa sering Anda profit (jika pemula, isi 40-50%).
+        2.  **Risk/Reward:** Jika Anda pasang Stop Loss 5% dan Target Profit 10%, berarti Rasionya 1:2 (Isi 2).
+        3.  **Hasil (Alokasi):** Sistem akan menghitung % modal maksimal yang **aman** dipertaruhkan.
+        
+        *Rumus ini dipakai oleh investor profesional untuk mengembangkan akun secara eksponensial tanpa risiko bangkrut.*
         """)
 
-    # --- BAGIAN 2: KAMUS ISTILAH ---
-    st.subheader("📖 Kamus Indikator (Penting!)")
+    with st.expander("🚀 Cara Menggunakan SCANNER Saham"):
+        st.markdown("""
+        1.  Pilih daftar saham (misal: *LQ45* atau *Energy*).
+        2.  Klik **Mulai Scan**.
+        3.  **Fokus pada kolom:**
+            * **Score:** Cari yang di atas 70.
+            * **DER (Utang):** Pastikan centang hijau (✅).
+            * **Valuasi:** Jika statusnya "💎 Super Murah", berarti potensi kenaikan (upside) masih lebar.
+        """)
+
+    # 3. KAMUS INDIKATOR (UPDATED)
+    st.subheader("📖 Kamus Indikator Lengkap")
     
-    with st.container(border=True):
-        st.markdown(f"#### 1. Bandarmology (Arus Dana)")
-        st.write("""
-        Mendeteksi pergerakan "Uang Besar" berdasarkan anomali volume.
-        * **AKUMULASI:** Harga naik + Volume meledak (Indikasi Bandar masuk). ✅
-        * **DISTRIBUSI:** Harga turun + Volume besar (Indikasi Bandar jualan). ❌
-        * **NETRAL:** Volume transaksi wajar/biasa saja.
+    tabs = st.tabs(["📊 Teknikal", "🏢 Fundamental", "🕵️ Bandarmology"])
+    
+    with tabs[0]: # Teknikal
+        st.markdown("""
+        * **CAGR (Growth):** Rata-rata pertumbuhan harga per tahun. Jika positif, berarti tren jangka panjang saham ini naik.
+        * **MA200 (Garis Biru di Chart):** Garis "Sakti". Jika harga di atas garis ini = **UPTREND (Aman)**. Jika di bawah = **DOWNTREND (Bahaya)**.
+        * **RSI:** Indikator "Gas & Rem".
+            * **> 70 (Overbought):** Harga sudah kemahalan/ngebut, rawan rem mendadak (turun).
+            * **< 30 (Oversold):** Harga sudah terlalu murah, potensi mantul naik.
         """)
         
-    with st.container(border=True):
-        st.markdown(f"#### 2. Fundamental (Kesehatan Perusahaan)")
-        st.write("""
-        * **Graham Number:** Rumus nilai wajar saham konservatif. Jika Harga < Graham = **Diskon**.
-        * **DER (Debt to Equity):** Rasio utang. Jika > 2.0 (200%), risiko bangkrut tinggi.
-        * **ROE (Return on Equity):** Keuntungan dibanding modal. Di atas 15% = Perusahaan Super.
+    with tabs[1]: # Fundamental
+        st.markdown("""
+        * **Current Ratio (CR):** Kemampuan perusahaan bayar utang jangka pendek. Wajib di atas **1.0x** (Aman).
+        * **DER (Debt to Equity):** Rasio utang dibanding modal. Batas aman maksimal **2.0x**. Di atas itu risiko bangkrut tinggi.
+        * **Graham Number:** Nilai wajar saham versi Benjamin Graham. Jika Harga Pasar < Graham Number = **DISKON/MURAH**.
+        * **ROE (Profitabilitas):** Seberapa jago manajemen cari untung. Di atas 15% = Istimewa.
+        """)
+        
+    with tabs[2]: # Bandarmology
+        st.markdown("""
+        * **AKUMULASI:** Pihak "Big Player" sedang memborong saham secara diam-diam (Harga Naik + Volume Besar).
+        * **DISTRIBUSI:** Pihak "Big Player" sedang jualan/cuci gudang (Harga Turun + Volume Besar).
+        * **NETRAL:** Transaksi didominasi ritel, tidak ada pergerakan signifikan dari bandar.
         """)
 
-    with st.container(border=True):
-        st.markdown(f"#### 3. Teknikal (Momentum & Tren)")
-        st.write("""
-        * **MA200 (Moving Average 200):** Rata-rata harga 1 tahun. Jika harga di atas garis ini, saham sedang **BULLISH** (Aman).
-        * **RSI (Relative Strength Index):**
-            * < 30: Jenuh Jual (Potensi mantul naik).
-            * > 70: Jenuh Beli (Hati-hati koreksi).
-            * 40-60: Area netral/konsolidasi.
-        """)
-
-        # --- BAGIAN 3: STUDI KASUS (NEW) ---
-    st.subheader("🎓 Studi Kasus: Cara Analisa")
-
-    col_case1, col_case2 = st.columns(2)
-
-    with col_case1:
-        with st.expander("✅ Contoh: SETUP SEMPURNA (Buy)", expanded=True):
-            st.markdown("""
-            **Skenario:** Anda menemukan saham "ABCD".
-            
-            1. **Tren:** Harga di atas garis Biru (MA200) dan Oranye (MA50). **(Status: UPTREND)**
-            2. **Bandarmology:** Harga naik sedikit, tapi Volume Ratio > 1.5x. **(Status: AKUMULASI)**
-            3. **Valuasi:** Harga Rp 1.000, tapi Graham Number Rp 1.500. **(Status: DISKON)**
-            4. **Kesehatan:** DER hanya 0.5x (Utang kecil).
-            
-            👉 **Kesimpulan:** Ini adalah *Hidden Gem*. Saham sehat, sedang diakumulasi bandar, dan trennya naik. **ACTION: BUY (Cicil Beli).**
-            """)
-
-    with col_case2:
-        with st.expander("❌ Contoh: JEBAKAN MURAH (Value Trap)", expanded=True):
-            st.markdown("""
-            **Skenario:** Anda melihat saham "GORE".
-            
-            1. **Tren:** Harga di bawah garis Biru (MA200). **(Status: DOWNTREND)**
-            2. **Valuasi:** PBV sangat murah (0.3x). Terlihat menggiurkan.
-            3. **Kesehatan:** DER mencapai 4.0x (Utang 4x lipat modal!). **(Status: BAHAYA)**
-            4. **Bandarmology:** Harga turun disertai volume besar. **(Status: DISTRIBUSI)**
-            
-            👉 **Kesimpulan:** Jangan terkecoh harga murah! Ini kemungkinan perusahaan mau bangkrut atau sedang ditinggalkan investor besar. **ACTION: HINDARI / JUAL.**
-            """)
+    # 4. STUDI KASUS (EDUKASI POLA PIKIR)
+    st.markdown("---")
+    st.subheader("🎓 Studi Kasus: Kapan Harus Masuk?")
     
-    st.info("💡 **Tips:** Jangan menelan mentah-mentah hasil scan. Selalu cek chart dan berita terkini sebelum membeli.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.success("✅ CONTOH IDEAL (Buy)")
+        st.markdown("""
+        1.  **AI Summary:** Bilang "STRONG BUY" atau "BUY ON WEAKNESS".
+        2.  **Chart:** Harga bermain di atas Garis Biru (MA200).
+        3.  **Bandar:** Status "AKUMULASI".
+        4.  **Kelly:** Disarankan masuk 10% modal.
+        
+        👉 **Action:** HAKA (Hajar Kanan) atau pasang Antri Beli di harga Support.
+        """)
+        
+    with c2:
+        st.error("⛔ CONTOH BAHAYA (Trap)")
+        st.markdown("""
+        1.  **AI Summary:** Bilang "AVOID".
+        2.  **Valuasi:** Terlihat "Super Murah", TAPI...
+        3.  **Kesehatan:** DER > 3.0x (Utang Raksasa) & Current Ratio < 1.0 (Gak punya duit cash).
+        4.  **Tren:** Harga terjun bebas di bawah MA200.
+        
+        👉 **Action:** JANGAN TERGIUR MURAHNYA. Ini "Value Trap" (Perusahaan mau bangkrut).
+        """)
+    
+    st.caption("Disclaimer: Panduan ini hanya untuk edukasi. Keputusan jual/beli tetap di tangan Anda.")
     # --- FOOTER ---
 st.markdown("---")
 st.markdown("""
