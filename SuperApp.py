@@ -1,13 +1,8 @@
 """
-TRADELOOP - Hybrid Stock Analytics Tool
-Copyright (c) 2026 Handiansyah Pria Atmaja
-Licensed under MIT License (Free for educational & personal use).
-
 Disclaimer:
 Aplikasi ini dibuat untuk tujuan edukasi dan berbagi pengetahuan.
 Tidak diperjualbelikan (Not for sale).
-"""
-"""
+
 TRADELOOP - V12.0 Dual-Tier System (Trading vs Investing)
 Copyright (c) 2026 Handiansyah Pria Atmaja
 Updated: Integrasi Real-time Data + Dual Scoring Engine
@@ -691,3 +686,4 @@ st.markdown("""
     <br>Built with 🐍 Python & TradeLoop Engine v10.6
 </div>
 """, unsafe_allow_html=True)
+
