@@ -134,28 +134,47 @@ LOTTIE_FUNDAMENTAL = "https://lottie.host/96e6d191-10d9-43c3-8f0a-1a8089403328/W
 # ==========================================
 # 3. LOGIC ENGINE (Updated v10.2)
 # ==========================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=15) # Cache pendek biar cepat update
 def get_stock_data(ticker, period="1y"):
     try:
         y_ticker = f"{ticker}.JK" if not ticker.endswith(".JK") else ticker
+        
+        # 1. AMBIL DATA HARIAN (Untuk Chart & Trend)
         df = yf.download(y_ticker, period=period, interval="1d", progress=False, auto_adjust=True)
-        if df is None or df.empty or len(df) < 15: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # Standardisasi kolom (jaga-jaga urutan tertukar)
-        if len(df.columns) >= 5:
-            df = df.iloc[:, :5]
-            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if df is None or df.empty: return None
         
-        # --- FILTER GLITCH (PENTING) ---
-        df = df.dropna()
-        df = df[df['Close'] > 0]       # Hapus baris jika harga 0/negatif
-        df = df[df['High'] >= df['Low']] # Hapus jika High lebih rendah dari Low (Data error)
+        # Fix MultiIndex & Kolom
+        if isinstance(df.columns, pd.MultiIndex): 
+            try: df.columns = df.columns.get_level_values(0)
+            except: pass
         
-        if df.empty: return None
-        df['Close'] = df['Close'].astype(float)
+        df.columns = [c.capitalize() for c in df.columns]
+        req_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(c in df.columns for c in req_cols): return None
+        df = df[req_cols].dropna()
+
+        # 2. TRIK KHUSUS: UPDATE HARGA TERAKHIR DENGAN DATA MENITAN
+        # (Supaya saat jam bursa, harganya sesuai detik ini, bukan harga kemarin)
+        try:
+            # Ambil data 1 hari terakhir, interval 1 menit
+            df_live = yf.download(y_ticker, period="1d", interval="1m", progress=False, auto_adjust=True)
+            if not df_live.empty:
+                if isinstance(df_live.columns, pd.MultiIndex): 
+                    df_live.columns = df_live.columns.get_level_values(0)
+                
+                # Ambil harga close menit terakhir sebagai "Current Price"
+                live_price = float(df_live['Close'].iloc[-1])
+                
+                # Timpa harga 'Close' di baris terakhir data harian dengan harga live ini
+                # agar chart dan indikator menghitung berdasarkan harga detik ini
+                df.iloc[-1, df.columns.get_loc('Close')] = live_price
+        except:
+            pass # Jika gagal ambil data menit, pakai data harian saja (fallback)
+
         return df
-    except: return None
+
+    except Exception: return None
 
 @st.cache_data(ttl=86400)
 def get_fundamentals(ticker):
