@@ -171,20 +171,36 @@ def get_fundamentals(ticker):
 
         data = {
             "name": info.get('longName', ticker),
-            "sector": info.get('sector', '-'),
             "pe": info.get('trailingPE', 0),
             "pbv": info.get('priceToBook', 0),
+            "ps": info.get('priceToSalesTrailing12Months', 0), # <--- NEW: Price to Sales
             "roe": info.get('returnOnEquity', 0),
             "div_yield": info.get('dividendYield', 0),
             "eps": info.get('trailingEps', 0),
             "book_value": info.get('bookValue', 0),
             "der": info.get('debtToEquity', 0) or 0,
             "current_ratio": info.get('currentRatio', 0) or 0,
+            "fcf": info.get('freeCashflow', 0),                # <--- NEW: Free Cash Flow
+            "shares": info.get('sharesOutstanding', 0),        # Butuh untuk hitung FCF/Share
+            "beta": info.get('beta', 1.0)                      # Risiko (untuk DCF)
         }
-        # Hitung Graham
+        
+        # 1. Hitung Graham Number (Valuasi Aset & Laba)
         if data['eps'] > 0 and data['book_value'] > 0:
             data['graham_num'] = np.sqrt(22.5 * data['eps'] * data['book_value'])
         else: data['graham_num'] = 0
+        
+        # 2. Hitung Simple DCF (Valuasi Arus Kas)
+        # Rumus Sederhana: (FCF per Share) / (Discount Rate - Growth Rate)
+        # Kita pakai asumsi konservatif: Growth 5%, Discount 10% (WACC) -> Cap Rate 5%
+        # Jadi Simplenya: FCF per Share x 20
+        if data['fcf'] and data['shares'] and data['fcf'] > 0:
+            fcf_per_share = data['fcf'] / data['shares']
+            # Menggunakan multiple 15x FCF (Konservatif)
+            data['dcf_value'] = fcf_per_share * 15 
+        else:
+            data['dcf_value'] = 0
+            
         return data
     except: return None
 
@@ -254,53 +270,52 @@ def calculate_analytics(df):
 
 # --- NEW: DUAL TIER SCORING ENGINE ---
 def calculate_dual_score(rsi, trend, bandar, fund, price, cagr, slope, obv_val):
-    # A. TRADING SCORE (Momentum, Bandar, Trend, OBV)
+    # A. TRADING SCORE (Tetap sama)
     t_score = 0
-    
-    # 1. RSI (20 poin)
-    if rsi < 40: t_score += 20       # Diskon
+    if rsi < 40: t_score += 20
     elif 40 <= rsi <= 60: t_score += 10
-    
-    # 2. Trend & Price Action (30 poin)
     if "UPTREND" in trend: t_score += 20
-    if slope > 0: t_score += 10 # Harga sedang nanjak
-    
-    # 3. Bandar & Smart Money (30 poin)
+    if slope > 0: t_score += 10
     if "AKUMULASI" in bandar: t_score += 20
     elif "NETRAL" in bandar: t_score += 10
-    if obv_val > 0.1: t_score += 10 # Akumulasi senyap
-    
-    # 4. Bonus Sinyal Kuat (20 poin)
-    # Divergence: Harga turun/datar tapi OBV naik (Bandar tampung)
+    if obv_val > 0.1: t_score += 10
     if slope <= 0 and obv_val > 0.05: t_score += 20
-    
-    t_score = min(t_score + 10, 100) # Base score bonus
+    t_score = min(t_score + 10, 100)
 
-    # B. INVESTING SCORE (Valuasi, Kesehatan, Dividen)
+    # B. INVESTING SCORE (Update dengan P/S & DCF)
     i_score = 0
     if fund:
         graham = fund.get('graham_num', 0)
+        dcf = fund.get('dcf_value', 0)
         pbv = fund.get('pbv', 0)
+        ps = fund.get('ps', 0) # Price to Sales
         
-        # 1. Valuasi (40 poin)
-        if graham > price: i_score += 20
-        if 0 < pbv < 1.5: i_score += 20
-        elif pbv < 3.0: i_score += 10
+        # 1. Valuasi (40 Poin)
+        # Jika Murah secara Graham ATAU DCF (Pilih salah satu yg valid)
+        valuation_score = 0
+        if graham > price: valuation_score += 20
+        if dcf > price: valuation_score += 20 # Bonus jika undervalued secara DCF
         
-        # 2. Kesehatan (30 poin)
+        # Cek Rasio
+        if 0 < pbv < 1.5: valuation_score += 10
+        if 0 < ps < 1.0: valuation_score += 10 # P/S di bawah 1.0 dianggap murah
+        
+        i_score += min(valuation_score, 40) # Maksimal 40 poin dari sisi valuasi
+        
+        # 2. Kesehatan (30 Poin)
         der = fund.get('der', 0)
         real_der = der/100 if der > 10 else der
-        if real_der < 1.0: i_score += 20 # Utang Aman
+        if real_der < 1.0: i_score += 20
         cr = fund.get('current_ratio', 0)
-        if cr > 1.0: i_score += 10       # Likuiditas Aman
+        if cr > 1.0: i_score += 10
         
-        # 3. Profit & Growth (30 poin)
+        # 3. Profit & Growth (30 Poin)
         if fund.get('roe', 0) > 0.15: i_score += 15
-        if cagr > 0.10: i_score += 15    # Perusahaan Tumbuh
+        if cagr > 0.10: i_score += 15
         
-        # Denda Fundamental Busuk
-        if fund.get('eps', 0) < 0: i_score -= 20 # Rugi
-        if real_der > 2.5: i_score -= 20         # Utang Kebanyakan
+        # Denda
+        if fund.get('eps', 0) < 0: i_score -= 20
+        if real_der > 2.5: i_score -= 20
         
     return max(0, min(t_score, 100)), max(0, min(i_score, 100))
 
@@ -452,17 +467,32 @@ elif menu == "📊 ANALISA LENGKAP":
                         "Nilai": [trend, bandar, f"{rsi:.1f}", f"{obv_val:.2f}"]
                     }).set_index('Metrik'), use_container_width=True)
                 with c2:
-                    st.markdown("###### 💎 Indikator Fundamental")
+                    st.markdown("###### 💎 Indikator Fundamental (Valuation)")
                     if fund:
                         der_val = fund.get('der', 0)
                         der_val = der_val/100 if der_val > 10 else der_val
                         graham = fund.get('graham_num', 0)
-                        upside = ((graham - price)/price)*100 if price > 0 else 0
+                        dcf = fund.get('dcf_value', 0)
+                        upside_g = ((graham - price)/price)*100 if price > 0 else 0
+                        upside_dcf = ((dcf - price)/price)*100 if price > 0 else 0
+                        
                         st.dataframe(pd.DataFrame({
-                            "Metrik": ["Graham Upside", "ROE (Profit)", "DER (Utang)", "PBV"],
-                            "Nilai": [f"{upside:+.1f}%", f"{fund.get('roe',0)*100:.1f}%", f"{der_val:.2f}x", f"{fund.get('pbv',0):.2f}x"]
+                            "Metrik": ["Fair Value (Graham)", "Fair Value (DCF)", "P/S Ratio", "PBV", "ROE"],
+                            "Nilai": [
+                                f"Rp {graham:,.0f} ({upside_g:+.0f}%)", 
+                                f"Rp {dcf:,.0f} ({upside_dcf:+.0f}%)", 
+                                f"{fund.get('ps',0):.2f}x", 
+                                f"{fund.get('pbv',0):.2f}x", 
+                                f"{fund.get('roe',0)*100:.1f}%"
+                            ],
+                            "Keterangan": [
+                                "Valuasi Aset", 
+                                "Valuasi Cashflow", 
+                                "< 1.0 Murah", 
+                                "< 1.5 Murah", 
+                                "> 15% Bagus"
+                            ]
                         }).set_index('Metrik'), use_container_width=True)
-
             else: st.error("Data tidak ditemukan.")
 
 # --- DATABASE ---
@@ -686,4 +716,3 @@ st.markdown("""
     <br>Built with 🐍 Python & TradeLoop Engine v10.6
 </div>
 """, unsafe_allow_html=True)
-
